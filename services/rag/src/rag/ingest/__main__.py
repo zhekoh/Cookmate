@@ -90,7 +90,9 @@ def print_summary(title: str, path: Path, result: ParseResult) -> None:
     sizes = sorted(len(s.content.split()) for s in result.sections)
     levels = Counter(s.level for s in result.sections)
     print(f"{title}\n  file: {path}")
-    print(f"  pages: {result.units}   sections: {len(result.sections)}   tables: {result.tables}")
+    print(
+        f"  pages kept: {result.units}   sections: {len(result.sections)}   tables: {result.tables}"
+    )
     print(
         "  sections by depth: "
         + ", ".join(f"level {level}: {count}" for level, count in sorted(levels.items()))
@@ -105,6 +107,10 @@ def print_summary(title: str, path: Path, result: ParseResult) -> None:
         f"text before any heading: {result.text_before_first_heading}"
     )
     print(f"  content hash: {result.content_hash[:16]}")
+    if result.skipped_pages:
+        print(f"  skipped {len(result.skipped_pages)} pages (about the book, not the subject):")
+        for page in result.skipped_pages:
+            print(f"    - {page}")
     for warning in result.warnings:
         print(f"  warning: {warning}")
 

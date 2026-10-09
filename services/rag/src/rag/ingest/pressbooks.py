@@ -1,50 +1,73 @@
 """Parse a Pressbooks XHTML export into sections.
 
-BCcampus books are published with Pressbooks, and its single-file XHTML export
-keeps the structure we need: each front-matter page, part, chapter and
-back-matter page is a ``div`` whose id names it (``chapter-<slug>``), and the
-headings inside it are real ``h1``-``h6`` elements.
+BCcampus books are published with Pressbooks. Its single-file XHTML export
+wraps every page in a ``div`` whose id names it: ``front-matter-<slug>``,
+``part-<slug>``, ``chapter-<slug>`` or ``back-matter-<slug>``.
 
 A *section* is one heading plus the text under it, up to the next heading.
 Its ``heading_path`` records where it sits ("Book > Chapter > Section"), and
 that path is what later lets a chunk be cited by book, chapter and section.
 
+WHAT THE REAL MARKUP TAUGHT US (Food Safety, Pressbooks 5.27, Oct 2026)
+The first version of this parser trusted heading tags (h1 above h2 above h3)
+and got the structure badly wrong: 62 "chapters" in a 10-chapter book.
+
+* The page title is marked by its CLASS, not its tag. Chapter titles are
+  ``<h2 class="chapter-title">``, while the authors' headings inside chapters
+  are mostly ``<h1>``. Tag order would make every section heading outrank
+  its own chapter. So the title is found by class and always sits at the top,
+  and headings inside a page are ranked only against each other.
+* Every page starts with a number heading (``<h3 class="chapter-number">4``)
+  before its title. It carries no meaning and is dropped.
+* Headings inside chapters have no ids, so there is no anchor to link to.
+  Citations use a text-fragment link instead (``#:~:text=The%20Danger%20Zone``),
+  which current browsers scroll to and highlight.
+* Most front and back matter is publisher boilerplate: accessibility
+  statement, About BCcampus, versioning history, print link lists. It says
+  "food safety" a lot and answers no food safety question, so it would
+  pollute retrieval. Only chapters and the glossary are kept; every skipped
+  page is listed in the ingest summary so the choice stays visible.
+
 What is kept, and how:
 * paragraphs, block quotes, captions: plain text, whitespace collapsed
 * lists: one "- item" (or "1. item") line per item, nested items indented
+* glossary entries: one "term: definition" line each
 * tables: Markdown, with the caption first as "Table: ...". Tables in these
   books are short reference data (temperatures, times), and Markdown keeps
   rows and columns readable to both the embedding model and the generator.
 
 What is dropped: images, scripts, navigation, image credit blocks and
-footnote lists. They are noise for retrieval. The licence of the book as a
-whole is recorded on the source row instead.
+footnote lists. The licence of the book as a whole is recorded on the source
+row instead.
 """
 
 import copy
 import hashlib
 import re
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, PreformattedString, Tag
 
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-TEXT_BLOCKS = {"p", "blockquote", "pre", "figcaption", "dt", "dd"}
+TEXT_BLOCKS = {"p", "blockquote", "pre", "figcaption"}
 LIST_TAGS = {"ul", "ol"}
 DROP_TAGS = {"script", "style", "nav", "img", "svg", "picture", "video", "audio", "iframe"}
 # Pressbooks puts image credits and footnotes in blocks with these classes.
 DROP_CLASSES = {"media-attributions", "footnotes", "before-footnotes"}
 
 UNIT_ID = re.compile(r"^(front-matter|part|chapter|back-matter)-(.+)$")
+TITLE_CLASSES = {"chapter-title", "front-matter-title", "back-matter-title", "part-title"}
+NUMBER_CLASSES = {"chapter-number", "front-matter-number", "back-matter-number", "part-number"}
 
 
 @dataclass(frozen=True)
 class Section:
     ordinal: int  # reading order within the book, from 0
-    level: int  # 1 = the chapter's own title, 2 = a heading under it, ...
+    level: int  # 1 = the page's own title, 2 = a heading under it, ...
     chapter: str
-    section: str | None  # None for text directly under the chapter title
+    section: str | None  # None for text directly under the page title
     heading_path: str
     url: str
     content: str
@@ -53,7 +76,8 @@ class Section:
 @dataclass
 class ParseResult:
     sections: list[Section]
-    units: int = 0  # front-matter, part, chapter and back-matter pages found
+    units: int = 0  # pages kept
+    skipped_pages: list[str] = field(default_factory=list)  # ids of pages left out
     tables: int = 0
     empty_headings: int = 0  # headings with no text before the next heading
     text_before_first_heading: int = 0  # blocks dropped because no heading owned them
@@ -85,13 +109,28 @@ def parse_book(html: str, *, book_title: str, base_url: str) -> ParseResult:
         result.warnings.append(
             "no Pressbooks page divs found; parsed the whole document as one page"
         )
-        body = soup.body or soup
-        units = [body]
+        units = [soup.body or soup]
 
     for unit in units:
+        unit_id = unit.get("id")
+        if isinstance(unit_id, str) and not keep_page(unit):
+            result.skipped_pages.append(unit_id)
+            continue
         result.units += 1
         _Walker(unit, book_title, _unit_url(unit, base_url), result).run()
     return result
+
+
+def keep_page(unit: Tag) -> bool:
+    """Chapters and glossaries teach the subject; the rest is about the book.
+
+    Parts are only a title over a group of chapters, and the remaining front
+    and back matter is publisher boilerplate (see the module docstring).
+    """
+    unit_id = str(unit.get("id", ""))
+    if unit_id.startswith("chapter-"):
+        return True
+    return unit_id.startswith("back-matter-") and "glossary" in _classes(unit)
 
 
 # ---- walking one page ---------------------------------------------------------
@@ -100,12 +139,16 @@ def parse_book(html: str, *, book_title: str, base_url: str) -> ParseResult:
 class _Walker:
     """Walks one page in reading order, cutting it into sections at headings."""
 
+    # The page title's rank: below every real tag level, so no heading inside
+    # the page can ever close it.
+    TITLE_LEVEL = 0
+
     def __init__(self, unit: Tag, book_title: str, page_url: str, result: ParseResult) -> None:
         self.unit = unit
         self.book_title = book_title
         self.page_url = page_url
         self.result = result
-        # (tag level, heading text) for every open heading, outermost first.
+        # (rank, heading text) for every open heading, page title first.
         self.stack: list[tuple[int, str]] = []
         self.anchor: str | None = None
         self.blocks: list[str] = []
@@ -113,6 +156,8 @@ class _Walker:
     def run(self) -> None:
         self._walk(self.unit)
         self._close_section()
+        if not self.stack:
+            self.result.warnings.append(f"{self.page_url}: no headings found")
 
     def _walk(self, node: Tag) -> None:
         for child in node.children:
@@ -129,6 +174,8 @@ class _Walker:
                 self._add_block(clean(child.get_text(" ")))
             elif child.name in LIST_TAGS:
                 self._add_block("\n".join(render_list(child)))
+            elif child.name == "dl":
+                self._add_block("\n".join(render_definitions(child)))
             elif child.name == "table":
                 self.result.tables += 1
                 self._add_block(table_to_markdown(child))
@@ -137,17 +184,32 @@ class _Walker:
                 self._walk(child)
 
     def _open_heading(self, heading: Tag) -> None:
+        classes = _classes(heading)
+        if classes & NUMBER_CLASSES:
+            return
         text = clean(heading.get_text(" "))
         if not text:
             return
         self._close_section()
+
+        # The page title, or the first heading of a page that has no marked
+        # title, becomes the root. Everything else ranks by tag below it.
+        if classes & TITLE_CLASSES or not self.stack:
+            self.stack = [(self.TITLE_LEVEL, text)]
+            self.anchor = None
+            return
+
         level = int(heading.name[1])
-        # A heading closes every open heading at its own level or deeper.
-        while self.stack and self.stack[-1][0] >= level:
+        while len(self.stack) > 1 and self.stack[-1][0] >= level:
             self.stack.pop()
         self.stack.append((level, text))
         heading_id = heading.get("id")
-        self.anchor = heading_id if isinstance(heading_id, str) and len(self.stack) > 1 else None
+        self.anchor = (
+            heading_id
+            if isinstance(heading_id, str)
+            # No id: a text fragment, which browsers scroll to and highlight.
+            else ":~:text=" + quote(text, safe="")
+        )
 
     def _add_block(self, text: str) -> None:
         if not text:
@@ -207,6 +269,30 @@ def render_list(tag: Tag, depth: int = 0) -> list[str]:
     return lines
 
 
+def render_definitions(dl: Tag) -> list[str]:
+    """A definition list (the glossary) as one "term: definition" line each.
+
+    Keeping term and definition on one line matters for retrieval: split
+    apart, a chunk could hold a definition without the word it defines.
+    """
+    lines: list[str] = []
+    term: str | None = None
+    for child in dl.find_all(["dt", "dd"]):
+        text = clean(child.get_text(" "))
+        if child.name == "dt":
+            if term:  # a term with no definition
+                lines.append(term)
+            term = text
+        elif term:
+            lines.append(f"{term}: {text}")
+            term = None
+        elif text:
+            lines.append(text)
+    if term:
+        lines.append(term)
+    return lines
+
+
 def table_to_markdown(table: Tag) -> str:
     caption_tag = table.find("caption")
     caption = clean(caption_tag.get_text(" ")) if caption_tag else ""
@@ -235,14 +321,14 @@ def table_to_markdown(table: Tag) -> str:
 # ---- helpers ------------------------------------------------------------------
 
 
-def _dropped(tag: Tag) -> bool:
-    if tag.name in DROP_TAGS:
-        return True
+def _classes(tag: Tag) -> set[str]:
     # bs4 returns class as a list of names; anything else means no classes.
     classes = tag.get("class")
-    if not isinstance(classes, list):
-        return False
-    return any(name in DROP_CLASSES for name in classes)
+    return set(classes) if isinstance(classes, list) else set()
+
+
+def _dropped(tag: Tag) -> bool:
+    return tag.name in DROP_TAGS or bool(_classes(tag) & DROP_CLASSES)
 
 
 def _inside_another_unit(tag: Tag) -> bool:
