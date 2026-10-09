@@ -1,48 +1,14 @@
 """Migration runner and schema tests, against a real Postgres with pgvector.
 
-These need a throwaway database. Locally:
-
-    docker compose --profile test up -d rag-test-db
-    export TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5433/postgres
-
-Without TEST_DATABASE_URL they are skipped, except in CI, where a skip would
-let the job go green without testing anything, so it fails instead.
+They use the `db` fixture from conftest.py, which needs TEST_DATABASE_URL;
+see services/rag/README.md.
 """
-
-import os
-from collections.abc import Iterator
-from urllib.parse import urlparse
 
 import psycopg
 import pytest
-from psycopg.rows import TupleRow
 
-from rag.db import connect
 from rag.db.migrate import Migration, MigrationError, apply, discover
-
-# The fixture below drops the whole `rag` schema. These are the only hosts it
-# will do that to, so a TEST_DATABASE_URL pasted from Supabase by mistake
-# fails the test run instead of deleting real data.
-THROWAWAY_HOSTS = {"localhost", "127.0.0.1", "postgres", "rag-test-db"}
-
-Conn = psycopg.Connection[TupleRow]
-
-
-@pytest.fixture
-def db() -> Iterator[Conn]:
-    url = os.environ.get("TEST_DATABASE_URL")
-    if not url:
-        if os.environ.get("CI"):
-            pytest.fail("TEST_DATABASE_URL is not set in CI, so the database tests would not run")
-        pytest.skip("TEST_DATABASE_URL not set; see the docstring at the top of this file")
-
-    host = urlparse(url).hostname
-    if host not in THROWAWAY_HOSTS:
-        pytest.fail(f"refusing to drop the rag schema on {host!r}: not a throwaway database")
-
-    with connect(url, autocommit=True) as conn:
-        conn.execute("DROP SCHEMA IF EXISTS rag CASCADE")
-        yield conn
+from tests.conftest import Conn
 
 
 def table_exists(conn: Conn, name: str) -> bool:

@@ -47,6 +47,14 @@ Example: `https://opentextbc.ca/foodsafety/open/download?type=xhtml`
 
 Download once per book, store the file's retrieval date, and do not crawl page by page.
 
+**Download by hand, in a browser.** As of 9 October 2026, `opentextbc.ca` (and
+`collection.bccampus.ca`) answer scripted requests with a Cloudflare bot check
+(HTTP 403, "Just a moment..."). Getting past it would mean pretending to be a
+browser, which is what the check exists to stop, so we don't. Open the export
+link in a browser and save the file as `services/rag/data/raw/{slug}.xhtml`
+(git-ignored). `python -m rag.ingest bccampus --title {slug}` prints the exact
+link if the file is missing, and records the file's date as the retrieval date.
+
 ### Attribution text (show with every citation)
 
 ```

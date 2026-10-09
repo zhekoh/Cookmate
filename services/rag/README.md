@@ -50,3 +50,15 @@ uv run pytest
 
 Without `TEST_DATABASE_URL` those tests are skipped locally. In CI they fail
 instead, so the job cannot go green without running them.
+
+## Ingest
+
+Each source is downloaded by hand (see `SOURCES.md` for why), parsed into
+sections, and written to `rag.sections`. Re-running replaces that source's
+sections in one transaction, so it is always safe.
+
+```bash
+# save the export as data/raw/foodsafety.xhtml first; the command prints the link
+uv run python -m rag.ingest bccampus --title foodsafety --dry-run   # parse and summarise only
+uv run python -m rag.ingest bccampus --title foodsafety             # write to the database
+```
