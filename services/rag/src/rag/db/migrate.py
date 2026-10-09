@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS rag.schema_migrations (
     checksum    text NOT NULL,
     applied_at  timestamptz NOT NULL DEFAULT now()
 );
+-- Same rule as every other table in `rag`: no access for Supabase's API roles.
+ALTER TABLE rag.schema_migrations ENABLE ROW LEVEL SECURITY;
 """
 
 

@@ -182,6 +182,22 @@ def test_the_keyword_column_is_filled_in_automatically(db: Conn) -> None:
     assert row == (1,)
 
 
+def test_every_table_in_the_rag_schema_has_row_level_security(db: Conn) -> None:
+    # A table added later without RLS would be one config change away from
+    # public, so this covers every table, not a fixed list.
+    apply(db)
+
+    rows = db.execute(
+        """
+        SELECT c.relname
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'rag' AND c.relkind = 'r' AND NOT c.relrowsecurity
+        """
+    ).fetchall()
+
+    assert rows == []
+
+
 def test_only_one_index_version_can_be_current(db: Conn) -> None:
     apply(db)
     add_source_and_version(db, status="current")
