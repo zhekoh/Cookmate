@@ -44,8 +44,10 @@ class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(
         # Values come from the process environment. Docker Compose and Fly both
         # inject them there; a local .env is loaded only for convenience and is
-        # git-ignored.
-        env_file=".env",
+        # git-ignored. Both paths are relative to where the command runs, so the
+        # repo's .env is found from the repo root or from services/rag. Neither
+        # exists inside the container or the tests' temporary directory.
+        env_file=(".env", "../../.env"),
         env_file_encoding="utf-8",
         # The repo's .env also holds the Node API's variables. Ignore them
         # rather than rejecting the whole file.
