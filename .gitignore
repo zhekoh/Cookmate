@@ -9,3 +9,12 @@ dist/
 **/data/*.db-wal
 .vite/
 coverage/
+
+# Python (services/rag)
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+services/rag/data/

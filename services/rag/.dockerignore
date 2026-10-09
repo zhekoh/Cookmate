@@ -1,0 +1,13 @@
+# The build context is services/rag, so the repo-root .dockerignore does not
+# apply here. Without this file, a local .env would be copied into the image.
+
+.env
+.env.*
+.venv
+__pycache__
+**/__pycache__
+.mypy_cache
+.ruff_cache
+.pytest_cache
+data
+tests

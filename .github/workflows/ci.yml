@@ -82,6 +82,45 @@ jobs:
           DEV_ALLOW_ANONYMOUS: "1"
           DATABASE_PATH: ./ci.db
 
+  rag:
+    name: RAG service (ruff, mypy, pytest)
+    runs-on: ubuntu-latest
+    # Independent of the Node jobs: separate language, separate lock file, no
+    # shared code. Running in parallel keeps the pipeline as fast as its
+    # slowest job, not the sum of both.
+    defaults:
+      run:
+        working-directory: services/rag
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: services/rag/uv.lock
+
+      # --locked fails if uv.lock is out of date with pyproject.toml, so CI
+      # tests exactly the dependency versions that were committed.
+      - name: Install
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Format
+        run: uv run ruff format --check
+
+      - name: Type check
+        run: uv run mypy
+
+      # No keys in CI. The tests use fake values and make no network calls,
+      # so they cost nothing and cannot fail because a vendor is down.
+      - name: Test
+        run: uv run pytest
+
+      - name: Image builds
+        run: docker build -t cookmate-rag:ci .
+
   docker:
     name: Image builds and boots
     runs-on: ubuntu-latest
