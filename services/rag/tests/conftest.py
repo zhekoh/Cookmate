@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from rag.config import Settings, get_settings
+from rag.config import Settings, get_database_settings, get_settings
 
 # Fake values only. Tests must never need a real key: CI has none, and a test
 # that silently used a real one could spend money or leak it in a log.
@@ -27,8 +27,10 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[No
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
     get_settings.cache_clear()
+    get_database_settings.cache_clear()
     yield
     get_settings.cache_clear()
+    get_database_settings.cache_clear()
 
 
 @pytest.fixture

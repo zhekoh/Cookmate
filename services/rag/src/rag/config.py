@@ -34,7 +34,13 @@ class ConfigError(RuntimeError):
 RequiredSecret = Annotated[SecretStr, Field(min_length=1)]
 
 
-class Settings(BaseSettings):
+class DatabaseSettings(BaseSettings):
+    """Just enough to reach the database.
+
+    Separate from ``Settings`` so tools that only touch the database, like the
+    migration runner, do not demand API keys they never use.
+    """
+
     model_config = SettingsConfigDict(
         # Values come from the process environment. Docker Compose and Fly both
         # inject them there; a local .env is loaded only for convenience and is
@@ -46,8 +52,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Postgres with pgvector: chunks, vectors and metadata (COO-7).
+    # Postgres with pgvector: chunks, vectors and metadata.
     database_url: RequiredSecret
+
+
+class Settings(DatabaseSettings):
+    """Everything the HTTP service needs."""
+
     # Generation, routing and the support check.
     anthropic_api_key: RequiredSecret
     # Embeddings and re-ranking.
@@ -61,13 +72,24 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Build the settings once and reuse them.
+    """Build the full settings once and reuse them."""
+    return _load(Settings)
+
+
+@lru_cache
+def get_database_settings() -> DatabaseSettings:
+    """Build only the database settings once and reuse them."""
+    return _load(DatabaseSettings)
+
+
+def _load[T: BaseSettings](cls: type[T]) -> T:
+    """Read ``cls`` from the environment.
 
     Raises ``ConfigError`` listing every bad variable, so one failed boot
     tells you everything that is wrong, not just the first thing.
     """
     try:
-        return Settings()
+        return cls()
     except ValidationError as exc:
         problems = [
             f"{'.'.join(str(part) for part in error['loc']).upper()}: {error['msg']}"

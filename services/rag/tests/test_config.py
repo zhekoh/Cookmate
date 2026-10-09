@@ -1,7 +1,16 @@
 import pytest
 
-from rag.config import ConfigError, get_settings
+from rag.config import ConfigError, get_database_settings, get_settings
 from tests.conftest import FAKE_ENV
+
+
+def test_database_settings_need_only_the_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The migration runner must not demand API keys it never uses.
+    monkeypatch.setenv("DATABASE_URL", FAKE_ENV["DATABASE_URL"])
+
+    settings = get_database_settings()
+
+    assert settings.database_url.get_secret_value() == FAKE_ENV["DATABASE_URL"]
 
 
 @pytest.mark.usefixtures("fake_env")

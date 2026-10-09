@@ -91,6 +91,23 @@ jobs:
     defaults:
       run:
         working-directory: services/rag
+    # A throwaway Postgres with pgvector, the same image as the local
+    # `rag-test-db`. The database tests drop and rebuild the `rag` schema, so
+    # they only ever run against a database like this one.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
 
@@ -113,10 +130,22 @@ jobs:
       - name: Type check
         run: uv run mypy
 
-      # No keys in CI. The tests use fake values and make no network calls,
-      # so they cost nothing and cannot fail because a vendor is down.
+      # No keys in CI. The tests use fake values and talk to nothing but the
+      # throwaway Postgres above, so they cost nothing and cannot fail because
+      # a vendor is down.
       - name: Test
         run: uv run pytest
+
+      # The real command, run twice on the same database. The second run must
+      # report "up to date": that is the "safe to re-run" promise, checked
+      # through the entry point a deploy would actually use.
+      - name: Migrations apply, then re-apply as a no-op
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: |
+          uv run python -m rag.db.migrate
+          uv run python -m rag.db.migrate | tee second-run.txt
+          grep -q "database is up to date" second-run.txt
 
       - name: Image builds
         run: docker build -t cookmate-rag:ci .

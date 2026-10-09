@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115",
+    # Postgres driver. The binary extra ships libpq inside the wheel, so
+    # neither a Mac nor the slim Docker image needs Postgres libraries installed.
+    "psycopg[binary]>=3.2",
     "pydantic-settings>=2.6",
     "uvicorn>=0.32",
 ]

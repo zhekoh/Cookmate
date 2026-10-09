@@ -97,5 +97,23 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # A throwaway Postgres with pgvector for the RAG service's database tests.
+  # The `test` profile keeps it out of a plain `docker compose up`; start it
+  # with `docker compose --profile test up -d rag-test-db`. No volume, on
+  # purpose: the tests drop and rebuild the schema every run, and nothing in
+  # here is worth keeping. Port 5433 avoids any Postgres already on 5432.
+  rag-test-db:
+    image: pgvector/pgvector:pg17
+    profiles: ["test"]
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
 volumes:
   cookmate-data:
