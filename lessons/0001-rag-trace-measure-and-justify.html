@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1: Tracing Cookmate's RAG</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+.card{border:1px solid var(--line);border-radius:10px;padding:.9rem 1.1rem;margin:1rem 0;background:var(--panel)}
+.card .task{margin:0 0 .5rem;font-weight:600}
+.card .n{font:600 .75rem var(--mono);color:var(--accent);letter-spacing:.06em}
+.card details summary{cursor:pointer;color:var(--accent);font-size:.9rem}
+.card .why{font-size:.9rem;color:var(--muted);margin:.4rem 0 0}
+.where{font:600 .8rem var(--mono);color:var(--accent);margin:1.2rem 0 .2rem}
+figure{margin:1.4rem 0}
+figure img{display:block;max-width:100%;height:auto;border:1px solid var(--line);border-radius:10px;background:#fff}
+figcaption{font-size:.9rem;color:var(--muted);margin-top:.5rem}
+.out{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:.7rem 1rem;margin:1rem 0;background:var(--panel)}
+.out h3{margin:.2rem 0 .4rem}
+.status{font:600 .72rem var(--mono);letter-spacing:.05em;padding:.1em .45em;border-radius:4px;white-space:nowrap}
+.built{color:var(--ok);border:1px solid var(--ok)}
+.planned{color:var(--bad);border:1px solid var(--bad)}
+</style>
+</head>
+<body>
+<main>
+<p class="kicker">Lesson 1 · Cookmate RAG · recap and practice · two sessions (1: sections 0–8, 2: sections 9–18) · COO-5 to COO-9</p>
+<h1>Tracing Cookmate's RAG: from a textbook to a ranked list of passages</h1>
+<p class="lede">What Milestones 0 and 1 built so far, and how to <em>prove</em> it works. You'll trace one textbook from download to vectors, look at every intermediate output, learn how retrieval quality is measured, find where a RAG system breaks, and learn to defend each optimisation with a number. Everything here is about what Cookmate's code actually does today, and each part that isn't built yet is labelled as planned. Ends with 12 interview cue cards.</p>
+
+<h2>0. Warm-up from the last session (2 minutes, no peeking)</h2>
+
+<div class="quiz" data-answer="2" data-why="Each model learns its own coordinate system, and here the lengths differ too (1024 vs 384). That's why every index version records one embedding model, and why the question must be embedded with the same model as the chunks.">
+  <p class="q">Why can't you compare a Voyage vector with a bge vector?</p>
+  <div class="opts">
+    <button>Because bge vectors are not normalised to length 1</button>
+    <button>Because Voyage stores its vectors as integer values</button>
+    <button>Each model has its own space, so distances mean nothing</button>
+    <button>Because pgvector only accepts one model per database</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<div class="quiz" data-answer="0" data-why="Embeddings capture meaning but blur exact terms like 'buttermilk', '2 hours' or 'HACCP'. Keyword search matches the literal word. Combining them is hybrid search, measured in COO-15.">
+  <p class="q">Why does the chunks table already have a keyword column?</p>
+  <div class="opts">
+    <button>Embeddings can miss exact terms that keywords find</button>
+    <button>Postgres needs it before it will store any vectors</button>
+    <button>It makes the vector search run in a shorter time</button>
+    <button>It is how the citation link finds the right heading</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<h2>1. The build in one paragraph</h2>
+<div class="twice">
+<p><b>Like you're 12</b></p>
+<p>Imagine a librarian who has to answer cooking questions, but only from one textbook, and has to say which page every answer came from. First you cut the book into short passages, each with a label saying which chapter and section it came from. Then you give every passage a "meaning fingerprint": a long list of numbers where passages about similar things get similar numbers. When a question comes in, you fingerprint the question the same way and pull out the passages whose fingerprints are closest. So far Cookmate has cut the book up, fingerprinted all 95 passages, and stored them. Answering the question, and checking the answer is backed up, comes next.</p>
+<p><b>Technically</b></p>
+<p>A separate Python service, <code>services/rag/</code>, ingests the BCcampus textbook <em>Food Safety, Sanitation, and Personal Hygiene</em> (CC BY 4.0) from its official Pressbooks XHTML export. It parses it into 81 sections, chunks them with a heading-aware chunker (max 400 estimated tokens, no overlap, heading path prefixed), embeds the 95 chunks with Voyage <code>voyage-4-lite</code> (1024 dimensions, <code>input_type="document"</code>, truncation off), and stores them in Supabase Postgres with pgvector, in a <code>rag</code> schema with row-level security. Every build is an <em>index version</em> that records its chunker settings, model, tokens billed, cost and a content hash. Retrieval is exact cosine search over the current version. A probe showed covered questions scoring 0.55–0.65 against their best chunk, an uncovered food question 0.33 and an off-topic question 0.21. The build cost $0.0004.</p>
+</div>
+
+<h2>2. The picture: the five stages, and where Cookmate is</h2>
+<figure>
+<img src="img/rag-pipeline.png" alt="The RAG pipeline in five stages: 1. Ingest documents: load, clean and split source data into chunks. 2. Embed and index: convert each chunk into a numerical vector and store it with its text and metadata. 3. Retrieve: embed the user query and find relevant indexed chunks, optionally reranking the results. 4. Augment the prompt: combine the query with selected retrieved content. 5. Generate the answer: the LLM responds using the supplied context, ideally with verifiable source references.">
+<figcaption>Every RAG system has these five stages. The table below says where each one lives in Cookmate, and whether it exists yet.</figcaption>
+</figure>
+
+<div class="wrap"><table>
+<tr><th>Stage</th><th>Cookmate code</th><th>Status</th></tr>
+<tr><td>1. Ingest documents</td><td><code>rag/ingest/pressbooks.py</code> (parse), <code>rag/ingest/store.py</code> (write), <code>python -m rag.ingest</code></td><td><span class="status built">BUILT</span> COO-8</td></tr>
+<tr><td>1b. Split into chunks</td><td><code>rag/chunk.py</code>, <code>HeadingAware</code></td><td><span class="status built">BUILT</span> COO-9</td></tr>
+<tr><td>2. Embed and index</td><td><code>rag/embed.py</code> (Voyage), <code>rag/indexer.py</code> (build, promote), <code>python -m rag.indexer</code></td><td><span class="status built">BUILT</span> COO-9</td></tr>
+<tr><td>3. Retrieve</td><td>One SQL query today, in a throwaway probe. A <code>retrieve()</code> function and <code>rag.search</code> CLI come next</td><td><span class="status planned">NEXT</span> COO-10</td></tr>
+<tr><td>3b. Rerank</td><td>Voyage <code>rerank-2.5-lite</code>, top 20 in, top 5 out</td><td><span class="status planned">PLANNED</span> COO-16</td></tr>
+<tr><td>4. Augment the prompt</td><td>Frozen system block; passages framed as quoted data; relevance gate</td><td><span class="status planned">PLANNED</span> COO-12</td></tr>
+<tr><td>5. Generate the answer</td><td>Structured <code>Answer</code> with claims, citation ids, abstention; support check</td><td><span class="status planned">PLANNED</span> COO-12, COO-24</td></tr>
+<tr><td>Measure it</td><td>Labelled questions, recall@k and MRR with intervals</td><td><span class="status planned">PLANNED</span> COO-11</td></tr>
+</table></div>
+<p class="note"><b>Say this honestly in an interview.</b> "Stages 1 and 2 are built and verified. Retrieval works as one SQL query and I've probed it. Generation and evaluation are next." An interviewer trusts a precise "not yet" far more than a vague "it does RAG".</p>
+
+<h2>3. The four outputs you should be able to show</h2>
+<p>A RAG system has four outputs worth inspecting. Each can be right while the next one is wrong, which is why you look at each one separately.</p>
+
+<div class="out">
+<h3>Output A: Embeddings</h3>
+<p>A vector of numbers representing text, for example <code>[0.12, -0.08, 0.31, ...]</code>. Real vectors have hundreds or thousands of dimensions, depending on the model.</p>
+<p><b>In Cookmate, for real</b> (chunk 20, "The Danger Zone", read from Supabase on 12 Oct 2026):</p>
+<pre><code>[-0.037919953, -0.041450992, 0.011636746, 0.050066233, 0.003977309, 0.018338948, -0.015663963, ...]
+dimensions: 1024      length (L2 norm): 1.0000      model: voyage-4-lite      input_type: document</code></pre>
+<p><b>Inspect it:</b></p>
+<pre><code>SELECT id, section, left(embedding::text, 90), vector_dims(embedding), vector_norm(embedding)
+FROM rag.chunks WHERE section = 'The Danger Zone';</code></pre>
+<p><b>What to check:</b> the dimension matches the version's <code>embedding_dim</code>, and the length is 1.0. A single vector tells you almost nothing on its own. You can't read meaning from it; you only compare it with other vectors from the <em>same</em> model.</p>
+</div>
+
+<div class="out">
+<h3>Output B: Retrieved chunks</h3>
+<p>A ranked list of records with chunk text, ids, metadata and usually a similarity or distance score. <b>This is the most important output to inspect when debugging retrieval.</b></p>
+<p><b>In Cookmate, for real</b> (the probe on 9 Oct 2026, question "What is HACCP?"):</p>
+<pre><code>rank  similarity  chunk
+1     0.651       An Approach to Food Safety &gt; The HACCP approach
+2     0.605       An Approach to Food Safety &gt; The HACCP approach &gt; Principle 1
+3     0.601       An Approach to Food Safety</code></pre>
+<p><b>Inspect it:</b> the query is section 6's SQL. Look at the ranks, the scores, the heading paths and whether the gold passage is in there at all.</p>
+</div>
+
+<div class="out">
+<h3>Output C: Context actually supplied to the LLM <span class="status planned">PLANNED</span></h3>
+<p>The selected chunks after filtering, reranking, deduplication, truncation and prompt assembly. <b>This may differ from the raw retrieval results.</b></p>
+<p><b>In Cookmate, planned for COO-12 and COO-16:</b> the top 20 from search are reranked, the top 5 kept, the relevance gate may drop everything (abstain without calling the model), and the survivors are wrapped as quoted data with their chunk ids. Output C is what the model really saw, so the trace must store <em>these</em> ids, not just Output B's.</p>
+</div>
+
+<div class="out">
+<h3>Output D: Final generated answer <span class="status planned">PLANNED</span></h3>
+<p>The LLM's response, possibly with citations or source ids. <b>A fluent answer does not prove that the correct evidence was retrieved or that every claim is supported.</b></p>
+<p><b>In Cookmate, planned for COO-12 and COO-24:</b> a structured <code>Answer</code> of claims, each with citation ids and a quoted span. Code checks every id was in Output C and every quote is really in its passage. A model then checks each claim is supported. If not, one regeneration, then an honest abstention.</p>
+</div>
+
+<h3>The score requires particular care</h3>
+<ul>
+<li><b>A similarity score may be better when higher.</b></li>
+<li><b>A distance score may be better when lower.</b></li>
+<li><b>A reranker may produce an entirely different type of score.</b></li>
+<li>For example, some vector-store APIs explicitly return cosine distance, where lower is better.</li>
+</ul>
+<p><b>Cookmate is exactly that example.</b> pgvector's <code>&lt;=&gt;</code> operator returns <em>cosine distance</em>: 0 means the same direction, lower is better. The probe orders by distance (ascending) and <em>displays</em> similarity as <code>1 - distance</code> (higher is better), so a person can read it. Voyage's vectors have length 1, so cosine similarity equals the dot product here. When the reranker arrives in COO-16, its relevance score is on its own scale and must never be compared with, or thresholded like, cosine similarity.</p>
+
+<h2>4. Trace the data flow, hop by hop</h2>
+<p>Every hop has an input, an output you can look at, and a command or query that shows it. If an answer is wrong later, you walk this list backwards until the output stops looking right.</p>
+<div class="path">
+  <div class="step"><span class="n">1</span><div><b>Raw book.</b> <code>services/rag/data/raw/foodsafety.xhtml</code>, 135 KB, downloaded by hand in a browser because opentextbc.ca blocks scripts with a Cloudflare check (<code>SOURCES.md</code>).<br><b>Inspect:</b> <code>grep -c 'id="chapter-' data/raw/foodsafety.xhtml</code> → 10 chapters.</div></div>
+  <div class="step"><span class="n">2</span><div><b>Parsed sections</b> (in memory). <code>parse_book()</code> at <code>pressbooks.py:95</code> keeps chapters and the glossary, skips 8 boilerplate pages, and cuts at headings.<br><b>Inspect:</b> <code>uv run python -m rag.ingest bccampus --title foodsafety --dry-run</code> prints pages kept, sections, depth, words per section, tables, skipped pages and a content hash. No database write.</div></div>
+  <div class="step"><span class="n">3</span><div><b>Stored sections.</b> <code>rag.sections</code>, 81 rows, written by <code>write_source()</code> in one transaction.<br><b>Inspect:</b> <code>SELECT ordinal, level, heading_path, length(content) FROM rag.sections ORDER BY ordinal;</code></div></div>
+  <div class="step"><span class="n">4</span><div><b>Chunks</b> (in memory). <code>HeadingAware.chunk()</code> at <code>chunk.py:104</code>.<br><b>Inspect:</b> <code>uv run python -m rag.indexer build --dry-run</code> → 95 chunks, token min/median/max, sections split, small chunks. No API call.</div></div>
+  <div class="step"><span class="n">5</span><div><b>Vectors</b> (Output A). <code>VoyageEmbedder.embed()</code> at <code>embed.py:231</code>.<br><b>Inspect:</b> the build prints tokens billed, calls, API seconds, seconds waiting and cost; the SQL in Output A shows any stored vector.</div></div>
+  <div class="step"><span class="n">6</span><div><b>Stored index version.</b> <code>rag.chunks</code> + one <code>rag.index_versions</code> row, written by <code>build()</code> at <code>indexer.py:73</code>.<br><b>Inspect:</b> <code>uv run python -m rag.indexer list</code>, then <code>sql/index-sanity.sql</code> (section 8).</div></div>
+  <div class="step"><span class="n">7</span><div><b>Ranked results</b> (Output B). Today, the SQL in section 6. From COO-10, <code>rag.search</code>.</div></div>
+</div>
+
+<h2>5. The code, line by line</h2>
+<p>Four excerpts, in the order data flows through them. The ① ② markers are for reading along; they're not in the real code.</p>
+
+<p class="where">services/rag/src/rag/ingest/pressbooks.py:186–211 · _open_heading: finding structure</p>
+<pre><code>def _open_heading(self, heading: Tag) -&gt; None:
+    classes = _classes(heading)
+    if classes &amp; NUMBER_CLASSES:
+        return
+        # ① the "4" before every chapter title (&lt;h3 class="chapter-number"&gt;) is dropped.
+    text = clean(heading.get_text(" "))
+    ...
+    self._close_section()
+        # ② a new heading ends the section before it.
+    if classes &amp; TITLE_CLASSES or not self.stack:
+        self.stack = [(self.TITLE_LEVEL, text)]
+        # ③ THE FIX. The page title is found by CLASS, not tag, and put at level 0,
+        #    so no &lt;h1&gt; inside the chapter can ever outrank it. Trusting tags made
+        #    62 "chapters" out of 10.
+        return
+    level = int(heading.name[1])
+    while len(self.stack) &gt; 1 and self.stack[-1][0] &gt;= level:
+        self.stack.pop()
+        # ④ body headings rank only against each other; index 0 (the title) is never popped.
+    self.stack.append((level, text))
+    ...
+        else ":~:text=" + quote(text, safe="")
+        # ⑤ no ids on these headings, so the citation link is a text fragment
+        #    the browser scrolls to and highlights.</code></pre>
+
+<p class="where">services/rag/src/rag/chunk.py:104–129 · HeadingAware.chunk: sections become chunks</p>
+<pre><code>def chunk(self, sections):
+    for section in sections:
+        header = section.heading_path
+            # ① "Food Safety ... &gt; Preventing Foodborne Illness &gt; The Danger Zone"
+        budget = max(self.max_tokens - self.estimate(header), self.max_tokens // 4)
+            # ② the header is repeated in every piece, so the body gets what's left of 400.
+        bodies = self._split(section.content, budget)
+            # ③ fits? one body. Too long? split at paragraphs, then items or table
+            #    rows, then sentences, into BALANCED parts (300+300+300, not 400+400+100).
+        for part, body in enumerate(bodies, start=1):
+            text = f"{header}\n\n{body}"
+            # ④ exactly what gets embedded AND stored: the heading gives short chunks
+            #    context ("Reheat to 74°C" is about leftovers) and gives keyword search
+            #    the heading's words.
+            chunks.append(Chunk(..., part=part, parts=len(bodies), text=text,
+                                token_estimate=self.estimate(text)))
+            # ⑤ part 2 of 3 is recorded, so a split section can be reassembled and checked.</code></pre>
+
+<p class="where">services/rag/src/rag/embed.py:254–283 · VoyageEmbedder._post: one request, safely</p>
+<pre><code>for attempt in range(1, self._max_attempts + 1):
+    self._pacer.wait_for(estimated_tokens)
+        # ① wait BEFORE sending if this would break the per-minute request or token
+        #    limit. Every attempt counts, retries included.
+    response = self._client.post(VOYAGE_URL, json=body, headers=self._headers)
+        # ② body = {"input": [...], "model": "voyage-4-lite",
+        #           "input_type": "document", "truncation": False}
+    if response.status_code == 200:
+        return response.json()
+    if response.status_code not in RETRYABLE_STATUS or attempt == self._max_attempts:
+        raise EmbeddingError(...)
+        # ③ a 400 is never retried: the request itself is wrong (e.g. a text too long).
+    retry_after = _retry_after(response)
+    if retry_after is not None:
+        self._sleep(retry_after); continue
+        # ④ the server said how long; believe it.
+    if response.status_code == 429:
+        self._sleep(min(15.0 * 2 ** (attempt - 1), 60.0)); continue
+        # ⑤ per-minute limits need a per-minute wait: 15s, 30s, 60s.
+    self._sleep(2 ** (attempt - 1))
+        # ⑥ outages and timeouts: 1s, 2s, 4s.</code></pre>
+
+<p class="where">services/rag/src/rag/indexer.py:73–141 · build: the safe build</p>
+<pre><code>chunks = strategy.chunk(sections)
+attributions = [attribution_for(...) for c in chunks]
+    # ① fail now, before anything is paid for, if a source has no licence line.
+conn.execute("DELETE FROM index_versions WHERE status = 'building'")
+    # ② clear a crashed earlier build. It was never served.
+INSERT INTO index_versions (..., status) VALUES (..., 'building') RETURNING id
+    # ③ the new version exists but retrieval can't see it: it only reads 'current'.
+result = embedder.embed([c.text for c in chunks], "document")
+    # ④ the slow, paid step, with NO database transaction open.
+with conn.transaction():
+    INSERT INTO chunks ... %s::vector          # all 95 rows
+    UPDATE index_versions SET status = 'ready', chunk_count, content_hash,
+           embed_tokens, embed_seconds, embed_cost_usd ...
+    # ⑤ chunks and their receipt land together, or not at all.
+if make_current:
+    promote(conn, version_id)
+    # ⑥ one more transaction: old current → retired, this → current.
+    #    A partial unique index makes two 'current' rows impossible.</code></pre>
+
+<h2>6. The metadata, on its own</h2>
+<div class="twice">
+<p><b>Like you're 12</b></p>
+<p>Every passage carries a luggage tag: which book, which chapter, which section, which piece of it, a link back to the page, and the licence. Every build carries a receipt: how it was cut, which fingerprint machine was used, how much it cost, and a code that changes if any passage changes. The tags make citations possible. The receipts make experiments comparable.</p>
+<p><b>Technically</b></p>
+</div>
+
+<h3>index_versions: one row per build (the experiment log)</h3>
+<div class="wrap"><table>
+<tr><th>Column</th><th>Current value (v3)</th><th>What it means</th><th>Why it matters</th></tr>
+<tr><td><code>status</code></td><td>current</td><td>building, ready, current or retired</td><td>Retrieval reads only <code>current</code>; at most one, enforced by an index</td></tr>
+<tr><td><code>chunker</code>, <code>chunker_version</code></td><td>heading_aware, 1</td><td>How text was split</td><td>Bumped when the splitting rules change</td></tr>
+<tr><td><code>chunk_params</code></td><td><code>{"max_tokens": 400, "tokens_per_word": 1.3}</code></td><td>The chunker's settings</td><td>Two arms are comparable only if you know what differed</td></tr>
+<tr><td><code>embedding_model</code>, <code>embedding_dim</code></td><td>voyage-4-lite, 1024</td><td>Which vector space</td><td>Never compare vectors across these</td></tr>
+<tr><td><code>chunk_count</code></td><td>95</td><td>Chunks stored</td><td>Checked against the actual rows (section 8)</td></tr>
+<tr><td><code>content_hash</code></td><td><code>08afb5b006e8…</code></td><td>Fingerprint of settings and every chunk's text</td><td>Same hash = same chunks; proves a rebuild changed nothing</td></tr>
+<tr><td><code>embed_tokens</code></td><td>19,927</td><td>Tokens Voyage billed</td><td>Cost, and a check on the chunker's estimate</td></tr>
+<tr><td><code>embed_cost_usd</code></td><td>0.000399</td><td>At $0.02 per million tokens</td><td>The marginal cost of an experiment arm</td></tr>
+<tr><td><code>embed_seconds</code></td><td>5.861</td><td>Time on the API, excluding our rate-limit pacing</td><td>Pacing measures the account tier, not the model</td></tr>
+</table></div>
+
+<h3>chunks: one row per searchable passage</h3>
+<div class="wrap"><table>
+<tr><th>Column</th><th>Example (chunk 20)</th><th>Use</th></tr>
+<tr><td><code>index_version_id</code></td><td>3</td><td>Which build; retrieval filters on it</td></tr>
+<tr><td><code>source_id</code></td><td>bccampus-foodsafety</td><td>Joins to licence, authority, trusted, jurisdiction</td></tr>
+<tr><td><code>section_ordinal</code>, <code>part</code>, <code>parts</code></td><td>17, 1, 1</td><td>Where it came from; part 2 of 3 means a split section</td></tr>
+<tr><td><code>chapter</code>, <code>section</code>, <code>heading_path</code></td><td>Preventing Foodborne Illness, The Danger Zone</td><td>The citation's "book › chapter › section"</td></tr>
+<tr><td><code>url</code></td><td><code>…/preventing-foodborne-illness/#:~:text=The%20Danger%20Zone</code></td><td>Deep link that scrolls to the heading</td></tr>
+<tr><td><code>attribution</code></td><td>"The Danger Zone", in Food Safety… Licensed under CC BY 4.0. …</td><td>The licence line shown with every citation</td></tr>
+<tr><td><code>content</code></td><td>Heading path, blank line, body</td><td>Exactly what was embedded; what the model will read</td></tr>
+<tr><td><code>token_count</code></td><td>263</td><td>The chunker's <em>estimate</em> (the billed total is on the version)</td></tr>
+<tr><td><code>embedding</code></td><td>1024 numbers</td><td>Output A</td></tr>
+<tr><td><code>tsv</code></td><td><code>'0':112,117 '140':56,80 …</code></td><td>Keyword index Postgres keeps in sync; GIN index in COO-15</td></tr>
+</table></div>
+<p class="note"><b>Two tables behind them.</b> <code>sources</code> holds one row per book: licence CC BY 4.0, authority high, trusted true, jurisdiction CA, retrieved 9 Oct 2026, snapshot hash. <code>sections</code> holds the 81 parsed sections, the raw material every chunking experiment starts from.</p>
+
+<h3>The retrieval query (Output B), annotated</h3>
+<pre><code>SELECT 1 - (c.embedding &lt;=&gt; :question_vector) AS similarity,   -- ① display: higher is better
+       c.heading_path, c.part, c.parts, c.url
+FROM rag.chunks c
+JOIN rag.index_versions v ON v.id = c.index_version_id
+WHERE v.status = 'current'                                       -- ② only the served build
+ORDER BY c.embedding &lt;=&gt; :question_vector                        -- ③ sort by DISTANCE: lower first
+LIMIT 5;                                                         -- ④ K</code></pre>
+<p>No vector index exists, so Postgres compares the question with all 95 chunks: exact search. It always finds the true nearest neighbours, and at this size it takes milliseconds.</p>
+
+<h2>7. How to read the numbers</h2>
+<h3>The build output, read out loud</h3>
+<pre><code>chunks: 95 from 81 sections
+estimated tokens per chunk: min 25, median 201, max 394 (limit 400), total 19790
+sections split: 10  7 into 2, 2 into 3, 1 into 4
+small chunks (&lt; 60 tokens): 7
+embedded: 19927 tokens billed in 6 call(s), 5.9s on the API (+117s waiting on rate limits), $0.000399
+token estimate check: estimated 19790, billed 19927 (1.31 tokens per word; the chunker assumes 1.3)</code></pre>
+<ul>
+<li><b>95 from 81:</b> most sections fit in one chunk; 10 were split. The 4-way split is the 690-word "Step 5 › REHEATING" section, which holds a summary table the authors gave no heading.</li>
+<li><b>max 394, limit 400:</b> the cap held.</li>
+<li><b>7 small chunks:</b> the 6–38-word "PREPARING / COOKING" subsections. Short chunks can embed weakly; whether that hurts is a question for the eval, not a guess.</li>
+<li><b>1.31 vs 1.30:</b> the word-based estimate is accurate on this book, so chunk sizes are what we think they are.</li>
+<li><b>5.9 s vs 117 s:</b> the model is fast; the free-tier account limit is what made it slow.</li>
+</ul>
+
+<h3>The similarity probe, read out loud</h3>
+<div class="wrap"><table>
+<tr><th>Question</th><th>Best similarity</th><th>Best chunk</th><th>Reading</th></tr>
+<tr><td>What temperature should my fridge be?</td><td>0.62</td><td>Refrigerated Products</td><td>Covered, right section</td></tr>
+<tr><td>What is HACCP?</td><td>0.65</td><td>The HACCP approach</td><td>Covered, right section</td></tr>
+<tr><td>How long can cooked food sit out?</td><td>0.63</td><td>Advance preparation</td><td>Covered, but see below</td></tr>
+<tr><td>Why did my hollandaise split? (not in this book)</td><td>0.33</td><td>Food Allergies</td><td>Wrong chunk, low score</td></tr>
+<tr><td>What's the weather tomorrow? (off topic)</td><td>0.21</td><td>Cleaning Procedures</td><td>Wrong chunk, lower score</td></tr>
+</table></div>
+<ul>
+<li><b>Ranking is what matters, not the raw number.</b> 0.62 is not a probability, and another model would give other values for the same pair.</li>
+<li><b>The gap is the signal.</b> 0.55–0.65 covered, 0.33 uncovered, 0.21 off-topic: that gap is what will let the system abstain. The cut-off must be tuned on labelled questions, not on five.</li>
+<li><b>Vector search always returns something.</b> The weather question still gets three "results". Without a threshold, the model would be handed cleaning procedures as evidence about the weather.</li>
+</ul>
+
+<h3>The two-hour rule: why eyeballing fails</h3>
+<pre><code>Q: How long can cooked food sit out before it is unsafe?
+#1   0.632        Top 10 List › 2. Advance preparation
+#2   0.594  [2h]  Top 10 List › 1. Improper cooling (1/2)
+#3   0.583  [2h]  Top 10 List › 4. Inadequate reheating for hot holding
+#4   0.573        Top 10 List › 8. Use of leftovers
+#5   0.551  [2h]  Food Safety Plan › Step 5 › REHEATING (3/3)
+#9   0.537        Time-temperature Control of PHFs (1/3)       ◀ the section that teaches it
+#20  0.512  [2h]  Time-temperature Control of PHFs (3/3)
+#22  0.510        Time-temperature Control of PHFs (2/3)
+     [2h] = the chunk states the two-hour rule; 12 chunks do in total</code></pre>
+<p>The top result <em>looks</em> fine. But the section dedicated to the rule ranks 9th, 20th and 22nd, and ranks 1 to 26 all sit between 0.63 and 0.50. Retrieval found the answer; its ordering is coarse. You only see this by looking past rank 1, and you only <em>measure</em> it with labelled questions (section 9).</p>
+
+<h2>8. How to know it works, and that it's measured right</h2>
+<p>Four checks, from "I can see it" to "I can prove it".</p>
+<div class="path">
+  <div class="step"><span class="n">1</span><div><b>See it.</b> <code>uv run python -m rag.indexer list</code> shows version 3, current, 95 chunks, 19,927 tokens, $0.000399, hash <code>08afb5b006e8</code>.</div></div>
+  <div class="step"><span class="n">2</span><div><b>See a chunk.</b> In the <a href="https://supabase.com/dashboard">Supabase SQL editor</a>:
+<pre><code>SELECT c.heading_path, c.part, c.parts, c.token_count, left(c.content, 200), c.url
+FROM rag.chunks c JOIN rag.index_versions v ON v.id = c.index_version_id
+WHERE v.status = 'current' ORDER BY c.ordinal LIMIT 10;</code></pre></div></div>
+  <div class="step"><span class="n">3</span><div><b>See it reproduce.</b> Rebuild with the same settings: the content hash must be identical. Change <code>--max-tokens</code>: it must change. Both are tested in <code>tests/test_indexer.py</code>.</div></div>
+  <div class="step"><span class="n">4</span><div><b>Prove it's right.</b> Paste <code>services/rag/sql/index-sanity.sql</code>. It checks rules that must always hold. On 12 Oct 2026, against the live index, every problem count was 0:
+<div class="wrap"><table>
+<tr><th>Rule</th><th>Why it must hold</th><th>Result</th></tr>
+<tr><td>Exactly one current version</td><td>Retrieval would be ambiguous otherwise</td><td>0</td></tr>
+<tr><td>Every vector has the version's dimension</td><td>A mixed-model index gives meaningless distances</td><td>0 of 95</td></tr>
+<tr><td>Every vector has length 1</td><td>Voyage normalises; otherwise similarity ≠ dot product</td><td>0 of 95</td></tr>
+<tr><td>Stored chunk count matches the version row</td><td>A partial write would show here</td><td>0</td></tr>
+<tr><td>No chunk over the token limit</td><td>The chunker's contract</td><td>0</td></tr>
+<tr><td>Every section has at least one chunk</td><td>Nothing silently dropped between hops 3 and 4</td><td>0 of 81</td></tr>
+<tr><td>Every split section has all its parts</td><td>No piece lost in a split</td><td>0</td></tr>
+<tr><td>Every chunk has a url and a licence line</td><td>No citation without attribution</td><td>0</td></tr>
+<tr><td>Every chunk starts with its heading path</td><td>What's stored is what was embedded</td><td>0</td></tr>
+</table></div></div></div>
+</div>
+<p class="note"><b>These prove the index is built correctly. They do not prove retrieval is good.</b> A perfectly built index can still rank the right passage 20th. That second question needs section 9.</p>
+
+<h2>9. Measuring retrieval quality</h2>
+<h3>A. Retrieval metrics</h3>
+<p>These measure whether your system finds the right evidence and ranks it well.</p>
+<div class="wrap"><table>
+<tr><th>Metric</th><th>What it tells you</th><th>Example interpretation</th></tr>
+<tr><td><b>Recall@K</b></td><td>How much of the relevant evidence is found in the top K results?</td><td>Recall@5 of 0.80 means 80% of the labelled relevant items were retrieved within the first five results, under your chosen definition of relevance.</td></tr>
+<tr><td><b>Precision@K</b></td><td>What proportion of the top K results are relevant?</td><td>Precision@5 of 0.60 means 3 of the top 5 retrieved items are relevant.</td></tr>
+<tr><td><b>Hit rate@K</b></td><td>Did at least one relevant item appear in the top K?</td><td>Hit rate@5 of 0.90 means 90% of test queries retrieved at least one relevant item in their top five.</td></tr>
+<tr><td><b>MRR</b></td><td>How highly ranked is the first relevant result, on average?</td><td>Higher MRR means the first useful result tends to appear closer to rank 1.</td></tr>
+<tr><td><b>nDCG@K</b></td><td>How good is the ranking when results have different degrees of relevance?</td><td>Higher nDCG means highly relevant chunks tend to appear nearer the top.</td></tr>
+</table></div>
+
+<h3>Worked example: one query, two definitions of "relevant"</h3>
+<p>The two-hour-rule question from section 7. The same ranking scores very differently depending on what you label as gold. That's what "under your chosen definition of relevance" means.</p>
+<div class="wrap"><table>
+<tr><th>Metric</th><th>Gold = any chunk stating the rule (12)</th><th>Gold = the dedicated section's 3 chunks</th></tr>
+<tr><td>Hit rate@5</td><td>1 (rank 2 is relevant)</td><td>0</td></tr>
+<tr><td>Recall@5</td><td>3 ÷ 12 = 0.25</td><td>0 ÷ 3 = 0</td></tr>
+<tr><td>Precision@5</td><td>3 ÷ 5 = 0.60</td><td>0</td></tr>
+<tr><td>Reciprocal rank</td><td>1 ÷ 2 = 0.50</td><td>1 ÷ 9 = 0.11</td></tr>
+</table></div>
+<p><b>nDCG@5</b> with graded relevance (dedicated section = 2, states the rule = 1, other = 0): the top five are graded 0, 1, 1, 0, 1. DCG = 1/log₂3 + 1/log₂4 + 1/log₂6 = 1.52. The ideal ranking (three 2s, then two 1s) has DCG 5.08. nDCG@5 = 1.52 ÷ 5.08 = <b>0.30</b>: the evidence is there, the best of it is not near the top.</p>
+<p class="note"><b>This is one query, from a probe.</b> Real numbers need the labelled set in COO-11: 30+ questions with gold sections written <em>before</em> running, every metric reported with a Wilson interval, and every run stored with the hash of the chunker, model and index version that produced it.</p>
+
+<h3>B. Generation metrics <span class="status planned">PLANNED</span></h3>
+<div class="wrap"><table>
+<tr><th>Metric</th><th>Measures</th><th>Main limitation</th><th>Cookmate plan</th></tr>
+<tr><td><b>Context precision</b></td><td>Whether relevant retrieved chunks are ranked above irrelevant ones</td><td>Depends on how relevance is judged and which variant of the metric is used</td><td>Labelled gold sections, COO-11</td></tr>
+<tr><td><b>Context recall</b></td><td>Whether the retrieved context covers the facts needed for the reference answer</td><td>Requires a reference or another way to establish the missing facts</td><td>Gold passage sets per question</td></tr>
+<tr><td><b>Faithfulness / groundedness</b></td><td>Whether the generated answer's claims are supported by the retrieved context</td><td>A faithful answer can still be incomplete or fail to answer the question</td><td>Support check, COO-24: code first, then a Haiku check per claim</td></tr>
+<tr><td><b>Answer relevancy</b></td><td>Whether the response addresses the user's question</td><td>A relevant-sounding response may still be factually wrong</td><td>Haiku judge, calibrated on 20 blind human labels, COO-71</td></tr>
+<tr><td><b>Answer correctness</b></td><td>Whether the response matches the expected answer or facts</td><td>Depends on reference quality and the evaluation method</td><td>Reference answers for a subset</td></tr>
+</table></div>
+
+<h3>C. Operational metrics</h3>
+<p>Your system could retrieve excellent chunks and generate accurate answers but still be too expensive or slow for real users. Track these separately.</p>
+<div class="wrap"><table>
+<tr><th>Metric</th><th>Why it matters</th><th>Cookmate today</th></tr>
+<tr><td><b>Retrieval latency</b></td><td>How long vector search and any filtering take</td><td>Not recorded yet (COO-62)</td></tr>
+<tr><td><b>Reranking latency</b></td><td>How much additional time reranking adds</td><td>No reranker yet (COO-16)</td></tr>
+<tr><td><b>End-to-end latency</b></td><td>How long the user waits for the final answer</td><td>No answers yet (COO-12)</td></tr>
+<tr><td><b>Token usage and cost</b></td><td>How much the embedding, reranking and generation calls cost</td><td><b>Recorded for index builds</b>: 19,927 tokens, $0.000399. Queries: not yet</td></tr>
+<tr><td><b>Error rate</b></td><td>How often retrieval, APIs, embeddings or generation fail</td><td>Failures raise <code>EmbeddingError</code> and leave a <code>building</code> row; not counted yet</td></tr>
+<tr><td><b>Index freshness</b></td><td>Whether changed or deleted source documents are reflected in the index</td><td>Visible: <code>sources.retrieved_on</code> vs the version's <code>completed_at</code>; content hashes show change</td></tr>
+<tr><td><b>Abstention quality</b></td><td>Whether the system appropriately admits when it lacks sufficient evidence</td><td>Probe shows the gap (0.33 / 0.21 vs 0.55+); measured with 10 unanswerable questions in COO-11</td></tr>
+</table></div>
+
+<h2>10. One question, end to end: the trace to aim for</h2>
+<p>Illustrative fields for a debugging view, not actual results from your code. Each stage says what Cookmate records today.</p>
+<div class="wrap"><table>
+<tr><th>Stage</th><th>Fields</th><th>Cookmate today</th></tr>
+<tr><td><b>1. Input</b></td><td>Original user query, rewritten query if applicable, metadata filters, timestamp and request ID.</td><td>Nothing stored per query yet</td></tr>
+<tr><td><b>2. Embedding</b></td><td>Provider, model identifier, vector dimension, duration and any query-specific embedding instructions.</td><td>Stored for <em>documents</em> on <code>index_versions</code>. The query side uses <code>input_type="query"</code>, not yet logged</td></tr>
+<tr><td><b>3. Retrieval</b></td><td>Top-K retrieved chunk IDs, ranks, scores, short content previews, source metadata and applied filters.</td><td>Probe output only. COO-62 adds a trace record per retrieval</td></tr>
+<tr><td><b>4. Reranking and context assembly</b></td><td>Original rank, reranked position, reranker score, chunks kept or removed, token count and truncation details.</td><td>Planned, COO-16 and COO-67</td></tr>
+<tr><td><b>5. Generation</b></td><td>LLM identifier, prompt/template version, selected source IDs, output, citation mappings, token usage and latency.</td><td>Planned, COO-12; prompt hash recorded</td></tr>
+<tr><td><b>6. Evaluation</b></td><td>Expected relevant sources, actual relevant sources, retrieval metrics, answer evaluation scores and any human reviewer judgement.</td><td>Planned, COO-11 (<code>rag_eval_runs</code>) and COO-71 (judge calibration)</td></tr>
+</table></div>
+<p class="note"><b>Why the trace must store Output C, not just Output B.</b> If the answer is wrong, the first question is "was the right passage in what the model actually saw?" If yes, it's a generation fault. If it was retrieved but cut by the reranker or the gate, it's an assembly fault. If it was never retrieved, it's retrieval. Without stages 3 and 4 logged separately, you can't tell which.</p>
+
+<h2>11. Identify failure points</h2>
+<p>Every failure gets classified as <b>ingestion</b>, <b>retrieval</b>, <b>assembly</b>, <b>generation</b> or <b>routing</b>, by walking the trace backwards. These are the ones Cookmate has already hit, or is built to catch.</p>
+<div class="wrap"><table>
+<tr><th>Failure</th><th>Symptom</th><th>Where to look</th><th>Hit in Cookmate?</th></tr>
+<tr><td>Parser misreads structure</td><td>Wrong heading paths; citations name the wrong chapter</td><td><code>ingest --dry-run</code>: "sections by depth"</td><td><b>Yes.</b> 62 "chapters" from 10; fixed by finding titles by class</td></tr>
+<tr><td>Boilerplate pollutes the corpus</td><td>"About this book" pages retrieved for real questions</td><td>Skipped pages list in the ingest summary</td><td><b>Avoided.</b> 8 pages skipped on purpose</td></tr>
+<tr><td>Content silently truncated</td><td>A chunk's second half can never be found, yet is cited</td><td><code>truncation: false</code> in <code>build_request</code></td><td><b>Prevented.</b> An over-long text is a loud error</td></tr>
+<tr><td>Query and document embedded differently</td><td>Lower similarity across the board</td><td><code>input_type</code> on each call</td><td>Prevented by design: document vs query</td></tr>
+<tr><td>Mixed models in one index</td><td>Nonsense distances</td><td><code>index-sanity.sql</code>: dimension rule</td><td>Prevented: one model per version</td></tr>
+<tr><td>Provider rate limits</td><td>Build fails with 429</td><td>Build output; <code>EmbeddingError</code></td><td><b>Yes.</b> Free tier 3 req / 10K tokens per minute; now paced</td></tr>
+<tr><td>Half-finished build served</td><td>Missing chunks</td><td><code>status</code>; chunk count rule</td><td>Prevented: build beside, promote in one transaction</td></tr>
+<tr><td>Right evidence ranked low</td><td>Generic answer from a weaker passage</td><td>Output B past rank 1; MRR</td><td><b>Yes.</b> The dedicated section ranked 9th–22nd</td></tr>
+<tr><td>No relevant evidence, results anyway</td><td>A confident answer built from unrelated text</td><td>Best similarity; abstention questions</td><td><b>Seen in the probe.</b> Weather → cleaning procedures at 0.21</td></tr>
+<tr><td>Stale index</td><td>Answers from an old edition</td><td><code>retrieved_on</code> vs <code>completed_at</code></td><td>Not yet relevant: one snapshot</td></tr>
+<tr><td>Unsupported claim in the answer</td><td>Fluent, cited, wrong</td><td>Support check per claim</td><td>Planned, COO-24</td></tr>
+</table></div>
+
+<h2>12. Justify optimisations with evidence</h2>
+<p>An optimisation is a claim: "X makes retrieval better at acceptable cost". Back it the same way every time.</p>
+<div class="path">
+  <div class="step"><span class="n">1</span><div><b>Fix the baseline first.</b> The current index version and a labelled question set, both hashed.</div></div>
+  <div class="step"><span class="n">2</span><div><b>Write the prediction down before running.</b> Which arm wins, roughly by how much, and why.</div></div>
+  <div class="step"><span class="n">3</span><div><b>Change one variable.</b> A new index version that differs from the baseline only in that setting, built beside it.</div></div>
+  <div class="step"><span class="n">4</span><div><b>Same questions, same metrics, with intervals.</b> Recall@5 and MRR with Wilson intervals; with 30 questions, a small difference is noise.</div></div>
+  <div class="step"><span class="n">5</span><div><b>Report the cost side too.</b> Build tokens and dollars (already recorded), query latency, and what didn't move.</div></div>
+  <div class="step"><span class="n">6</span><div><b>Promote only on evidence.</b> One transaction; the old version stays as the baseline.</div></div>
+</div>
+
+<div class="wrap"><table>
+<tr><th>Lever</th><th>What it trades</th><th>Measured in</th></tr>
+<tr><td>Chunk size (400 now)</td><td>Bigger keeps context but blurs meaning; smaller is sharp but loses context</td><td>COO-13</td></tr>
+<tr><td>Split strategy</td><td>Heading-aware keeps clean citations; fixed-size with overlap is uniform but cuts across sections</td><td>COO-13</td></tr>
+<tr><td>Heading path prefix</td><td>Context for short chunks vs a few tokens each</td><td>An ablation: build without it</td></tr>
+<tr><td>Embedding model</td><td>Quality vs cost and latency; hosted vs self-run</td><td>COO-14 (Voyage vs bge-small)</td></tr>
+<tr><td>Vector size and number format</td><td>Voyage offers 256–2048 dimensions and int8/binary: less storage, possibly lower quality</td><td>A follow-on experiment</td></tr>
+<tr><td>Keyword + vector (hybrid)</td><td>Exact terms like "2 hours" vs a second ranking to fuse</td><td>COO-15</td></tr>
+<tr><td>Reranker</td><td>Fixes coarse ordering vs extra latency and cost per question</td><td>COO-16</td></tr>
+<tr><td>K</td><td>More evidence vs more noise and prompt cost</td><td>COO-11 (recall@5 vs @10)</td></tr>
+<tr><td>Abstention threshold</td><td>Too high refuses good questions; too low answers bad ones</td><td>COO-69</td></tr>
+<tr><td>Exact vs approximate index</td><td>Perfect recall vs speed at millions of chunks</td><td>COO-17 (Pinecone)</td></tr>
+</table></div>
+<p class="note"><b>The evidence for the reranker already exists, before any eval.</b> In section 7, ranks 1 to 26 sat within 0.13 of each other, and the dedicated section ranked 9th. That's a hypothesis worth testing, written down before the test. "Rerankers usually help" is not.</p>
+
+<h2>13. Trace these functions in your repository</h2>
+<p>The key is to talk about what your code actually does, not what a textbook RAG system could do. Open each file and answer out loud.</p>
+<div class="wrap"><table>
+<tr><th>Find this in your code</th><th>Questions you should be able to answer</th><th>Cookmate's answer</th></tr>
+<tr><td><b>Document ingestion</b><br><code>ingest/pressbooks.py</code>, <code>ingest/store.py</code></td><td>Where does the source data come from? What gets included or excluded?</td><td>Official XHTML export, downloaded by hand (Cloudflare). Chapters and glossary kept; 8 boilerplate pages, images, credits, scripts and footnotes dropped. Licence in <code>SOURCES.md</code></td></tr>
+<tr><td><b>Chunking</b><br><code>chunk.py</code></td><td>What splits the documents? What are the chunk size and overlap? Why?</td><td><code>HeadingAware</code>: one chunk per section, max 400 estimated tokens, <b>no overlap</b>, balanced splits, heading path prefixed. Why: a chunk maps to a citable section. Fixed-size with overlap is the comparison arm</td></tr>
+<tr><td><b>Embedding generation</b><br><code>embed.py</code></td><td>Which provider and model? What dimensions? How are failures handled?</td><td>Voyage <code>voyage-4-lite</code>, 1024 dims, unit length. Truncation off. Pacing, <code>Retry-After</code>, 429 backoff 15/30/60 s, outages 1/2/4 s, no retry on 400. Vectors matched to inputs by index</td></tr>
+<tr><td><b>Vector storage</b><br><code>migrations/</code>, <code>indexer.py</code></td><td>Which database and index? What fields are stored? How are updates and deletions handled?</td><td>Supabase Postgres + pgvector 0.8.2, <code>rag</code> schema, RLS on. <b>No ANN index</b>: exact scan. Updates = a new index version, promoted in one transaction; old ones retired; crashed builds deleted; re-ingest replaces a book's sections</td></tr>
+<tr><td><b>Retrieval</b></td><td>What is the query path? What is K? Which distance metric is used? Are filters applied?</td><td>Today: one SQL query. Cosine distance <code>&lt;=&gt;</code>, filter <code>status = 'current'</code>, K = 3–5 in the probe. Function and CLI in COO-10</td></tr>
+<tr><td><b>Reranking</b></td><td>Is there a reranker? What candidates does it receive, and how many results survive?</td><td><b>None yet.</b> Planned: Voyage <code>rerank-2.5-lite</code>, top 20 in, top 5 out, kept only if COO-16 shows it earns its latency</td></tr>
+<tr><td><b>Prompt assembly</b></td><td>Which retrieved text is actually included? How are token limits and source references handled?</td><td><b>Not built.</b> Planned: survivors framed as quoted data with chunk ids; frozen, cacheable system block; relevance gate can send nothing</td></tr>
+<tr><td><b>Generation</b></td><td>Which LLM? What prompt and output format? What happens when evidence is insufficient?</td><td><b>Not built.</b> Planned: Sonnet, structured <code>Answer</code> (claims, citation ids, quotes), abstention with a reason</td></tr>
+<tr><td><b>Evaluation</b></td><td>Are there labelled test queries? Which metrics are actually calculated? Are they tested automatically?</td><td><b>Not yet labelled.</b> 76 automated tests prove the pipeline is built correctly, and <code>index-sanity.sql</code> proves the live index. Retrieval metrics come in COO-11</td></tr>
+<tr><td><b>Observability</b></td><td>Do the logs show intermediate chunks, scores, latency and failures, or only the final answer?</td><td>Build-time: yes (summary, version row, hash, cost). Query-time: <b>not yet</b>; that's COO-62 and COO-145</td></tr>
+</table></div>
+
+<h2>14. What the measurement found that nobody asked for</h2>
+<ol>
+<li><b>Tag order lies in real books.</b> The authors used <code>&lt;h1&gt;</code> inside chapters and <code>&lt;h2&gt;</code> for chapter titles. Only checking a dry run against the real file showed 62 chapters out of 10.</li>
+<li><b>Most of a textbook's pages aren't about its subject.</b> 8 of 19 pages were boilerplate that would have competed for every query.</li>
+<li><b>The provider's rate limiter doesn't count like its bill.</b> A batch billed at about 7,300 tokens was refused under a 10,000 limit. Batches are now capped at 40% of the per-minute limit.</li>
+<li><b>Word-based token estimates are good enough here:</b> 1.30 assumed, 1.31 billed.</li>
+<li><b>Similarity scores are bunched.</b> The top result looked right while the dedicated section ranked 9th. Retrieval quality can't be judged from rank 1.</li>
+</ol>
+
+<h2>15. Takeaways</h2>
+<div class="path">
+  <div class="step"><span class="n">1</span><div>Inspect four outputs separately: embeddings, retrieved chunks, the context the model actually saw, and the answer. Each can be right while the next is wrong.</div></div>
+  <div class="step"><span class="n">2</span><div>Know your score's direction. pgvector returns cosine <em>distance</em> (lower is better); a reranker's score is on its own scale.</div></div>
+  <div class="step"><span class="n">3</span><div>Prove the index with rules that must always hold. Prove retrieval with labelled questions. They're different questions.</div></div>
+  <div class="step"><span class="n">4</span><div>Every build is an experiment arm with a receipt. Change one variable, write the prediction first, report intervals and cost.</div></div>
+  <div class="step"><span class="n">5</span><div>Say what's built and what's planned. A precise "not yet" is stronger than a vague "it does RAG".</div></div>
+</div>
+
+<div class="say">
+<p class="kicker">Say this in an interview</p>
+<p>"I ingest an openly licensed food-safety textbook from its official export, parse it into sections by heading, and keep only the chapters and glossary. The first parser trusted heading tags and made 62 chapters out of 10, so titles are found by class now. Each section becomes one chunk unless it's over 400 tokens, then it splits into balanced parts, and every chunk starts with its heading path. I embed with Voyage's voyage-4-lite at 1024 dimensions, documents and queries in different modes, truncation off, and store them in Postgres with pgvector. Each build is a versioned index row with its settings, tokens, cost and a content hash, built beside the live one and promoted in one transaction. Search is exact cosine over about a hundred chunks. Nine invariants hold on the live index. On retrieval, covered questions score 0.55 to 0.65 and off-topic ones about 0.2, which is what abstention will rest on, but the scores are bunched: the section that teaches the two-hour rule ranked ninth. That's why the next step is a labelled question set with recall and MRR, and only then a reranker, if the numbers say it helps."</p>
+</div>
+
+<h2>16. Retrieval (10 minutes)</h2>
+
+<div class="quiz" data-answer="1" data-why="pgvector's &lt;=&gt; returns cosine distance: 0 is the same direction, lower is better. The probe sorts by distance and displays 1 minus distance as similarity.">
+  <p class="q">What does pgvector's &lt;=&gt; operator return in Cookmate's query?</p>
+  <div class="opts">
+    <button>Cosine similarity, where a higher value is better</button>
+    <button>Cosine distance, where a lower value is better</button>
+    <button>Euclidean distance between the two raw texts</button>
+    <button>A relevance score on the reranker's own scale</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<div class="quiz" data-answer="3" data-why="Output C is what the model actually saw, after reranking, the gate and assembly. If the answer is wrong, you need it to tell a retrieval fault from an assembly or generation fault.">
+  <p class="q">Why must the trace store Output C, not just Output B?</p>
+  <div class="opts">
+    <button>Because Output B is too large to keep in Postgres</button>
+    <button>Because Output C is the only one with any scores</button>
+    <button>Because the embeddings are only computed for it</button>
+    <button>It is what the model saw, which may differ from B</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<div class="quiz" data-answer="0" data-why="The title is found by class and held at level 0, so an &lt;h1&gt; inside the chapter can't pop it. Trusting tag order gave 62 chapters out of 10.">
+  <p class="q">How does the parser stop in-chapter h1s outranking chapter titles?</p>
+  <div class="opts">
+    <button>It finds the title by class and pins it at level 0</button>
+    <button>It ignores every h1 that appears inside a chapter</button>
+    <button>It renumbers all headings by their font size first</button>
+    <button>It asks the model which heading is the chapter one</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<div class="quiz" data-answer="2" data-why="With truncation on, Voyage silently embeds only the start. The chunk would be stored, searchable by its first half only, and still cited. Off, it's a loud error at build time.">
+  <p class="q">Why is Voyage's truncation turned off at index time?</p>
+  <div class="opts">
+    <button>Truncated vectors are stored at a lower dimension</button>
+    <button>Voyage charges twice for every truncated input text</button>
+    <button>Otherwise a chunk's end is silently never searchable</button>
+    <button>Truncation only works when input_type is the query</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<div class="quiz" data-answer="1" data-why="Gold = any chunk stating the rule: ranks 2, 3 and 5 are relevant, so 3 of the top 5. The first relevant is at rank 2, so reciprocal rank is 0.5.">
+  <p class="q">For the two-hour query, what is precision@5 with the broad gold set?</p>
+  <div class="opts">
+    <button>0.25, because 3 of the 12 relevant chunks appear</button>
+    <button>0.60, because 3 of the top 5 results are relevant</button>
+    <button>0.11, because the dedicated section ranks 9th here</button>
+    <button>1.00, because at least one relevant chunk appears</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<div class="quiz" data-answer="3" data-why="The sanity rules prove the index is built correctly. A perfectly built index can still rank the right passage 20th; only labelled questions measure that.">
+  <p class="q">All nine sanity rules pass. What does that prove?</p>
+  <div class="opts">
+    <button>That recall@5 on real questions is above 0.80</button>
+    <button>That the answers the model writes will be correct</button>
+    <button>That the reranker is not needed for this corpus</button>
+    <button>That the index is built correctly, not that it ranks well</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<div class="quiz" data-answer="0" data-why="Vector search always returns the K nearest, however far. The weather question still got cleaning procedures at 0.21. A threshold, tuned on labelled unanswerable questions, is what lets it abstain.">
+  <p class="q">Why does Cookmate need a relevance threshold before generation?</p>
+  <div class="opts">
+    <button>Vector search returns K results even when none fit</button>
+    <button>pgvector refuses queries whose best score is low</button>
+    <button>The model cannot read more than five chunks at once</button>
+    <button>Voyage only returns vectors above a set similarity</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<div class="quiz" data-answer="2" data-why="embed_seconds is time on the API only; pacing measures the account's tier. 5.9 s on the API, 117 s waiting on the free-tier limits.">
+  <p class="q">Why does embed_seconds leave out the 117 s of rate-limit waiting?</p>
+  <div class="opts">
+    <button>Because Voyage does not bill for the time spent waiting</button>
+    <button>Because the waiting happened in a separate transaction</button>
+    <button>Because waiting measures the account tier, not the build</button>
+    <button>Because the waiting only applies to the query embeddings</button>
+  </div>
+  <p class="fb"></p>
+</div>
+
+<p class="score"></p>
+
+<h2>17. Interview cue cards</h2>
+<p><b>Write</b> means code it live in a blank file (time yourself). <b>Explain</b> and <b>Design</b> mean say the answer out loud first. Only then open the model answer. Any card you miss goes to the top of tomorrow's session.</p>
+
+<div class="card"><p class="n">CARD 1 · EXPLAIN WITH THE CODE OPEN</p>
+<p class="task">"Walk me through how a textbook becomes searchable vectors in your code."</p>
+<details><summary>Model answer</summary>
+<ol>
+<li><code>pressbooks.py:95</code> <code>parse_book</code>: official XHTML export → sections. Titles found by class, number headings dropped, boilerplate pages skipped, tables to Markdown, glossary as "term: definition".</li>
+<li><code>store.py</code> <code>write_source</code>: 81 sections replace the book's old ones in one transaction.</li>
+<li><code>chunk.py:104</code>: one chunk per section, long ones split into balanced parts under 400 tokens, heading path first.</li>
+<li><code>indexer.py:73</code> <code>build</code>: new version as <code>building</code>, embed with no transaction open, write chunks and mark <code>ready</code> together, promote in one more transaction.</li>
+<li><code>embed.py:231</code>: Voyage, <code>input_type="document"</code>, truncation off, paced, retried, vectors matched by index.</li>
+</ol>
+<p class="why">Then the numbers: 95 chunks, 19,927 tokens, $0.0004, 5.9 s on the API.</p>
+</details></div>
+
+<div class="card"><p class="n">CARD 2 · EXPLAIN</p>
+<p class="task">"How do you know your index is correct?"</p>
+<details><summary>Model answer</summary>
+<ul>
+<li><b>Invariants on the live index</b> (<code>sql/index-sanity.sql</code>): one current version; every vector has the version's dimension and length 1; stored count matches the receipt; no chunk over the limit; every section has a chunk; every split has all its parts; every chunk has a url and a licence line and starts with its heading path. All 0 problems.</li>
+<li><b>Reproducibility:</b> same settings give the same content hash; different settings don't.</li>
+<li><b>Estimate vs bill:</b> 1.30 vs 1.31 tokens per word.</li>
+</ul>
+<p class="why">And be clear: that's the index being built right. Whether it ranks well is a separate measurement.</p>
+</details></div>
+
+<div class="card"><p class="n">CARD 3 · WRITE · 20 MINUTES, NO AI</p>
+<p class="task">"Given a ranked list of chunk ids and a set of relevant ids, write hit@k, recall@k, precision@k, reciprocal rank and nDCG@k."</p>
+<details><summary>Model answer</summary>
+<pre><code>import math
+
+def hit_at_k(ranked: list[str], relevant: set[str], k: int) -&gt; float:
+    return 1.0 if any(c in relevant for c in ranked[:k]) else 0.0
+
+def recall_at_k(ranked: list[str], relevant: set[str], k: int) -&gt; float:
+    if not relevant:
+        raise ValueError("no relevant items: recall is undefined")
+    return len(set(ranked[:k]) &amp; relevant) / len(relevant)
+
+def precision_at_k(ranked: list[str], relevant: set[str], k: int) -&gt; float:
+    return sum(c in relevant for c in ranked[:k]) / k
+
+def reciprocal_rank(ranked: list[str], relevant: set[str]) -&gt; float:
+    for i, c in enumerate(ranked, start=1):
+        if c in relevant:
+            return 1.0 / i
+    return 0.0          # MRR = mean of this over all queries
+
+def ndcg_at_k(ranked: list[str], grades: dict[str, int], k: int) -&gt; float:
+    def dcg(gains: list[int]) -&gt; float:
+        return sum(g / math.log2(i + 1) for i, g in enumerate(gains, start=1))
+    actual = dcg([grades.get(c, 0) for c in ranked[:k]])
+    ideal = dcg(sorted(grades.values(), reverse=True)[:k])
+    return actual / ideal if ideal else 0.0</code></pre>
+<p class="why"><b>Checking:</b> 1-based ranks; recall's denominator is all relevant items, precision's is k; an empty relevant set is an error, not 0; log₂(i+1) discount; nDCG divides by the ideal ordering. Check against section 9: precision@5 = 0.6, RR = 0.5, nDCG@5 ≈ 0.30.</p>
+</details></div>
+
+<div class="card"><p class="n">CARD 4 · WRITE · 10 MINUTES, NO AI</p>
+<p class="task">"Write exact top-k cosine search over a list of (id, vector) pairs, without numpy."</p>
+<details><summary>Model answer</summary>
+<pre><code>import heapq, math
+
+def norm(v: list[float]) -&gt; float:
+    return math.sqrt(sum(x * x for x in v))
+
+def top_k(query: list[float], items: list[tuple[str, list[float]]], k: int) -&gt; list[tuple[str, float]]:
+    qn = norm(query)
+    if qn == 0:
+        raise ValueError("zero query vector")
+    scored = []
+    for chunk_id, v in items:
+        if len(v) != len(query):
+            raise ValueError(f"{chunk_id}: dimension {len(v)} != {len(query)}")
+        sim = sum(a * b for a, b in zip(query, v)) / (qn * norm(v))
+        scored.append((sim, chunk_id))
+    return [(cid, sim) for sim, cid in heapq.nlargest(k, scored)]   # similarity: higher is better</code></pre>
+<p class="why"><b>Checking:</b> a dimension check (mixed models); cosine = dot ÷ norms (and just the dot product for unit vectors like Voyage's); <code>heapq.nlargest</code> is O(n log k); naming the score direction. It's what pgvector does for you without an index.</p>
+</details></div>
+
+<div class="card"><p class="n">CARD 5 · EXPLAIN</p>
+<p class="task">"Your search returns a score of 0.62. Is that good?"</p>
+<details><summary>Model answer</summary>
+<ul>
+<li><b>Which score?</b> Cookmate displays cosine similarity, 1 minus pgvector's cosine distance. Higher is better.</li>
+<li><b>Relative, not absolute:</b> it's not a probability, and another model gives other values. Compare within one model and one index version.</li>
+<li><b>Against the distribution:</b> covered questions 0.55–0.65, uncovered 0.33, off-topic 0.21 in our probe. So 0.62 looks like a covered question.</li>
+<li><b>A reranker's score</b> is a different scale entirely; never threshold it like cosine.</li>
+</ul>
+</details></div>
+
+<div class="card"><p class="n">CARD 6 · EXPLAIN</p>
+<p class="task">"The top result looks right. Is retrieval good?"</p>
+<details><summary>Model answer</summary>
+<ul>
+<li>Not provable from rank 1. For "how long can cooked food sit out", three chunks stating the two-hour rule were in the top 5, but the section dedicated to it ranked 9th, 20th and 22nd, and ranks 1 to 26 sat within 0.13.</li>
+<li>The metric depends on the gold definition: broad gold gives precision@5 0.6 and RR 0.5; dedicated-section gold gives hit@5 0 and RR 0.11.</li>
+<li>So: a labelled set, gold written before running, recall@k and MRR with intervals.</li>
+</ul>
+</details></div>
+
+<div class="card"><p class="n">CARD 7 · DESIGN</p>
+<p class="task">"How would you choose the chunk size?"</p>
+<details><summary>Model answer</summary>
+<ol>
+<li>Baseline: today's heading-aware 400-token version and a labelled question set, both hashed.</li>
+<li>Prediction written first.</li>
+<li>New versions differing only in <code>max_tokens</code> (and a fixed-size-with-overlap arm), built beside the baseline.</li>
+<li>Same questions: recall@5, MRR with intervals; build cost from the version rows.</li>
+<li>Also look at what changes for citations: smaller chunks mean more, narrower citations.</li>
+<li>Promote only if the interval says it's real.</li>
+</ol>
+</details></div>
+
+<div class="card"><p class="n">CARD 8 · DESIGN</p>
+<p class="task">"An answer is wrong. How do you find out which stage broke?"</p>
+<details><summary>Model answer</summary>
+<ol>
+<li>Was the right passage in the <b>corpus</b>? Check sections: was it parsed, or was its page skipped?</li>
+<li>Was it <b>retrieved</b> (Output B)? If not, retrieval: the embedding, K, or hybrid search.</li>
+<li>Was it in what the <b>model saw</b> (Output C)? If retrieved but dropped, reranker or gate.</li>
+<li>Did the <b>answer</b> use it (Output D)? If it saw it and still got it wrong, generation; the support check should catch it.</li>
+</ol>
+<p class="why">That's why the trace must log each output separately. Classify every failure as ingestion, retrieval, assembly or generation.</p>
+</details></div>
+
+<div class="card"><p class="n">CARD 9 · EXPLAIN</p>
+<p class="task">"Your index build fails halfway. What happens to users?"</p>
+<details><summary>Model answer</summary>
+<ul>
+<li>Nothing. The new version is <code>building</code>; retrieval reads only <code>current</code>.</li>
+<li>Embedding runs with no transaction open; chunks and the <code>ready</code> mark are written in one transaction, so a crash writes nothing half-way.</li>
+<li>The next build deletes the abandoned <code>building</code> row.</li>
+<li>Promotion is a separate transaction, and a partial unique index makes two current versions impossible. All tested.</li>
+</ul>
+</details></div>
+
+<div class="card"><p class="n">CARD 10 · EXPLAIN</p>
+<p class="task">"How do you handle the embedding provider's rate limits?"</p>
+<details><summary>Model answer</summary>
+<ul>
+<li>Pace on our side: a one-minute sliding window of requests and estimated tokens, checked before every attempt, retries included.</li>
+<li>Batches sized by tokens as well as count, capped at 40% of the per-minute limit, because Voyage's limiter refused a batch billed at about 7,300 tokens under a 10,000 limit.</li>
+<li>429: follow <code>Retry-After</code>; otherwise 15, 30, 60 s. Outages: 1, 2, 4 s. A 400 is never retried.</li>
+<li>Stored latency excludes our pacing: 5.9 s on the API vs 117 s waiting.</li>
+</ul>
+</details></div>
+
+<div class="card"><p class="n">CARD 11 · DESIGN</p>
+<p class="task">"When would you add an approximate index or move to Pinecone?"</p>
+<details><summary>Model answer</summary>
+<ul>
+<li>Not at 95 chunks: exact search is milliseconds and perfectly accurate.</li>
+<li>When the corpus reaches hundreds of thousands to millions of chunks, or query load competes with the app's own Postgres work.</li>
+<li>Cost: recall below 100% (measure it against exact search), memory, slow builds, tuning knobs, and filters that can return fewer than K.</li>
+<li>pgvector HNSW first; Pinecone when nobody should run the index. Measured in COO-17, not asserted.</li>
+</ul>
+</details></div>
+
+<div class="card"><p class="n">CARD 12 · EXPLAIN</p>
+<p class="task">"What's the difference between context recall and faithfulness? Why isn't a fluent, cited answer proof?"</p>
+<details><summary>Model answer</summary>
+<ul>
+<li><b>Context recall</b>: did retrieval bring the facts the reference answer needs? A retrieval question.</li>
+<li><b>Faithfulness</b>: is every claim in the answer supported by the context it was given? A generation question.</li>
+<li>An answer can be faithful but incomplete (context recall was low), or cite a passage that doesn't say what the claim says.</li>
+<li>Cookmate's plan: code checks every cited id was retrieved and every quote is really in its passage; a model checks each claim is supported; one retry, then abstain.</li>
+</ul>
+</details></div>
+
+<h2>18. Primary sources</h2>
+<p><a href="https://docs.voyageai.com/docs/embeddings">Voyage, Text embeddings</a>: models, dimensions, <code>input_type</code>, <code>truncation</code>, batch limits. <a href="https://docs.voyageai.com/docs/pricing">Voyage, Pricing</a>: $0.02 per million tokens for voyage-4-lite, 200M free (checked 9 Oct 2026). <a href="https://github.com/pgvector/pgvector">pgvector</a>: <code>&lt;=&gt;</code> is cosine distance; exact search without an index. Your data: <code>RAG-DESIGN.md</code>, <code>services/rag/SOURCES.md</code>, <code>python -m rag.indexer list</code>, <code>services/rag/sql/index-sanity.sql</code>, and Linear COO-5 to COO-9.</p>
+
+<h2>Next</h2>
+<p>Run <code>index-sanity.sql</code> yourself in the Supabase SQL editor. Retake sections 16–17 tomorrow before starting, without rereading. Then COO-10 (the <code>search</code> command) and COO-11, where you write the labelled question set: the step that turns section 9's single example into real numbers.</p>
+
+<footer><p>Ask me anything that's unclear; that's what I'm for. Previous: <a href="../../wisergoalsapp/docs/learning/llm-apps-course/lessons/0007-build-4-streaming-recap-and-cards.html">Wiser Goals lesson 7</a> (streaming). Design: <code>RAG-DESIGN.md</code>. Pipeline diagram: <code>img/rag-pipeline.png</code>.</p></footer>
+</main>
+<script src="assets/quiz.js"></script>
+</body>
+</html>
