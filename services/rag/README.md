@@ -62,3 +62,19 @@ sections in one transaction, so it is always safe.
 uv run python -m rag.ingest bccampus --title foodsafety --dry-run   # parse and summarise only
 uv run python -m rag.ingest bccampus --title foodsafety             # write to the database
 ```
+
+## Index
+
+Sections are chunked, embedded with Voyage, and stored as a new **index
+version**. Retrieval only reads the version marked `current`, so a build never
+disturbs what is being served, and older versions stay as baselines.
+
+```bash
+uv run python -m rag.indexer build --dry-run                    # chunk and summarise; no API, no writes
+uv run python -m rag.indexer build --make-current               # embed, store, serve
+uv run python -m rag.indexer build --make-current --free-tier   # same, paced for 3 req / 10K tokens per minute
+uv run python -m rag.indexer list                               # every version: settings, tokens, cost, hash
+```
+
+`--free-tier` is for a Voyage account with no payment method on file. Adding
+one lifts the limits; the first 200M tokens are free either way.

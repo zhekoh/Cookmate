@@ -39,6 +39,19 @@ class BCcampusBook:
         )
 
 
+def attribution_for(source_id: str, heading: str, url: str) -> str:
+    """The licence line for a chunk from ``source_id``, headed ``heading``.
+
+    Raises for a source this registry does not know: a chunk whose licence
+    line cannot be produced must not be indexed.
+    """
+    if source_id.startswith("bccampus-"):
+        book = BCCAMPUS_BOOKS.get(source_id.removeprefix("bccampus-"))
+        if book:
+            return book.attribution(heading, url)
+    raise KeyError(f"no attribution rule for source {source_id!r}")
+
+
 BCCAMPUS_BOOKS: dict[str, BCcampusBook] = {
     book.slug: book
     for book in (
