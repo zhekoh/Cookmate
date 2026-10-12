@@ -78,3 +78,24 @@ uv run python -m rag.indexer list                               # every version:
 
 `--free-tier` is for a Voyage account with no payment method on file. Adding
 one lifts the limits; the first 200M tokens are free either way.
+
+## Search
+
+Ask the current index a question and read what comes back. This is dense
+retrieval only: exact cosine search over every chunk in the version.
+
+```bash
+uv run python -m rag.search "how should I wash my hands before handling food?"
+uv run python -m rag.search "what is the danger zone?" -k 10 --full
+uv run python -m rag.search "what is the danger zone?" --version 2   # an older build
+uv run python -m rag.search "..." 2>>traces.jsonl                    # keep the trace lines
+```
+
+Scores are cosine **similarity** (higher is closer). pgvector's `<=>` returns
+distance (lower is closer); `retrieve.py` converts in one place. Retrieval
+always returns k chunks, so a low top score means the corpus probably does not
+cover the question, not that the search failed.
+
+Each retrieval logs one JSON line to stderr: question, k, index version,
+embedding model, query tokens, time spent embedding and searching, and the
+chunk ids and scores in rank order.
