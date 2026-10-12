@@ -10,6 +10,15 @@ import psycopg
 from psycopg.rows import TupleRow
 
 
+def vector_literal(vector: list[float]) -> str:
+    """pgvector's text format, '[0.1,0.2,...]', for a ``%s::vector`` parameter.
+
+    ``repr`` keeps every digit of each float, so the stored vector is exactly
+    the one the provider returned.
+    """
+    return "[" + ",".join(repr(x) for x in vector) + "]"
+
+
 def connect(url: str, *, autocommit: bool = False) -> psycopg.Connection[TupleRow]:
     conn = psycopg.connect(url, autocommit=autocommit)
     try:

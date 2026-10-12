@@ -34,7 +34,7 @@ from psycopg.types.json import Jsonb
 
 from rag.chunk import Chunk, HeadingAware, SectionText, Strategy, chunks_hash
 from rag.config import ConfigError, get_database_settings, get_settings
-from rag.db import connect
+from rag.db import connect, vector_literal
 from rag.embed import NO_LIMIT, VOYAGE_FREE_TIER, Embedder, VoyageEmbedder
 from rag.ingest.sources import attribution_for
 
@@ -63,11 +63,6 @@ def load_sections(conn: Conn) -> list[SectionText]:
         """
     ).fetchall()
     return [SectionText(*row) for row in rows]
-
-
-def vector_literal(vector: list[float]) -> str:
-    """pgvector's text format: '[0.1,0.2,...]'."""
-    return "[" + ",".join(repr(x) for x in vector) + "]"
 
 
 def build(conn: Conn, strategy: Strategy, embedder: Embedder, *, make_current: bool) -> BuildReport:
