@@ -9,6 +9,8 @@ dependencies = [
     # there is no compiled dependency to install.
     "beautifulsoup4>=4.13",
     "fastapi>=0.115",
+    # HTTP client for the Voyage API; also what FastAPI's TestClient uses.
+    "httpx2>=2.13",
     # Postgres driver. The binary extra ships libpq inside the wheel, so
     # neither a Mac nor the slim Docker image needs Postgres libraries installed.
     "psycopg[binary]>=3.2",
@@ -18,7 +20,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx2",        # FastAPI's TestClient is built on it
     "mypy>=1.13",
     "pytest>=8.3",
     "ruff>=0.8",
